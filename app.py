@@ -7,11 +7,13 @@ import time
 st.set_page_config(page_title="StockX Highest Bid Tracker", layout="wide", page_icon="📈")
 st.title("📈 StockX Live Bid Tracker")
 
-# ─── CLIENT CREDENTIALS (from your message) ──────────────────────
-CLIENT_ID = "MEAKGJ4qhl0vtGnLWo9wxTr5h10hqxVA"
-CLIENT_SECRET = "JRBGbGmDmzKSPSzjgNM-_ZDA86OlfJ0Lb7020aTHL9Du-CCDfyhVIoBd6L18yehr"
+# ─── SECURE API KEY ──────────────────────────────────────────────
+api_key = st.secrets.get("STOCKX_API_KEY", None)
+if not api_key:
+    st.error("StockX API key not found. Add STOCKX_API_KEY in Settings → Secrets.")
+    st.stop()
 
-
+headers = {"Authorization": f"Bearer {api_key}"}
 
 # ─── SESSION STATE ───────────────────────────────────────────────
 if "tracked_bids" not in st.session_state:
@@ -22,10 +24,7 @@ if "tracked_bids" not in st.session_state:
     ])
 
 # ─── FETCH MARKET DATA ───────────────────────────────────────────
-# Remove the get_access_token() function completely
-
 def fetch_market_data(sku, size):
-    headers = {"Authorization": f"Bearer {api_key}"}
     try:
         # Search product
         r = requests.get(f"https://api.stockx.com/v2/search?q={sku}", headers=headers, timeout=10)
@@ -57,6 +56,51 @@ def fetch_market_data(sku, size):
 
     except Exception as e:
         return None, str(e)
+
+# ─── SIDEBAR CONTROLS ────────────────────────────────────────────
+st.sidebar.header("Refresh Settings")
+refresh_min = st.sidebar.slider("Auto-refresh every (minutes)", 1, 60, 5)
+st.session_state.refresh_interval = refresh_min * 60
+
+if st.sidebar.button("Force Refresh All"):
+    st.rerun()
+
+# ─── ADD NEW TRACKING ────────────────────────────────────────────
+st.subheader("Track a New SKU + Size")
+col1, col2 = st.columns(2)
+with col1:
+    sku = st.text_input("SKU", placeholder="e.g. HF7723-001")
+with col2:
+    size = st.text_input("UK Size", placeholder="e.g. 10.5")
+
+if st.button("Add & Fetch Current Bid"):
+    if sku and size:
+        data, err = fetch_market_data(sku.strip(), size.strip())
+        if err:
+            st.error(err)
+        else:
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            new_row = {
+                "SKU": sku.strip(),
+                "Size": size.strip(),
+                "Added At": now,
+                "Shoe Name": data["name"],
+                "Colorway": data["colorway"],
+                "Highest Bid": data["highest_bid"],
+                "Lowest Ask": data["lowest_ask"],
+                "Last Sale": data["last_sale"],
+                "# Asks": data["num_asks"],
+                "Bid Change": "—",
+                "Last Updated": now
+            }
+            st.session_state.tracked_bids = pd.concat(
+                [st.session_state.tracked_bids, pd.DataFrame([new_row])],
+                ignore_index=True
+            )
+            st.success(f"Added {sku} {size} – fetched live data")
+    else:
+        st.warning("Enter SKU and Size")
+
 # ─── LIVE TABLE ──────────────────────────────────────────────────
 st.subheader("Tracked Bids – Live Updates")
 
