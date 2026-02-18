@@ -100,6 +100,9 @@ else:
 if "last_refresh" not in st.session_state:
     st.session_state.last_refresh = time.time()
 
+if "refresh_interval" not in st.session_state:
+    st.session_state.refresh_interval = 300  # default 5 min
+
 if time.time() - st.session_state.last_refresh >= st.session_state.refresh_interval:
     st.session_state.last_refresh = time.time()
     st.rerun()
