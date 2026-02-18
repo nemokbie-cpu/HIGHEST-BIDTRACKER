@@ -7,13 +7,28 @@ import time
 st.set_page_config(page_title="StockX Highest Bid Tracker", layout="wide", page_icon="📈")
 st.title("📈 StockX Live Bid Tracker")
 
-# ─── SECURE API KEY ──────────────────────────────────────────────
-api_key = st.secrets.get("STOCKX_API_KEY", None)
-if not api_key:
-    st.error("StockX API key not found. Add STOCKX_API_KEY in Settings → Secrets.")
-    st.stop()
+# ─── CLIENT CREDENTIALS (from your message) ──────────────────────
+CLIENT_ID = "MEAKGJ4qhl0vtGnLWo9wxTr5h10hqxVA"
+CLIENT_SECRET = "JRBGbGmDmzKSPSzjgNM-_ZDA86OlfJ0Lb7020aTHL9Du-CCDfyhVIoBd6L18yehr"
 
-headers = {"Authorization": f"Bearer {api_key}"}
+# ─── GET ACCESS TOKEN ────────────────────────────────────────────
+@st.cache_data(ttl=3500)  # token usually lasts ~1 hour
+def get_access_token():
+    try:
+        token_url = "https://api.stockx.com/v2/oauth/token"
+        payload = {
+            "grant_type": "client_credentials",
+            "client_id": CLIENT_ID,
+            "client_secret": CLIENT_SECRET
+        }
+        r = requests.post(token_url, data=payload, timeout=10)
+        if r.status_code != 200:
+            st.error(f"Token request failed: {r.status_code} - {r.text}")
+            return None
+        return r.json().get("access_token")
+    except Exception as e:
+        st.error(f"Token fetch error: {str(e)}")
+        return None
 
 # ─── SESSION STATE ───────────────────────────────────────────────
 if "tracked_bids" not in st.session_state:
@@ -23,8 +38,14 @@ if "tracked_bids" not in st.session_state:
         "Bid Change", "Last Updated"
     ])
 
-# ─── FETCH FUNCTION ──────────────────────────────────────────────
+# ─── FETCH MARKET DATA ───────────────────────────────────────────
 def fetch_market_data(sku, size):
+    token = get_access_token()
+    if not token:
+        return None, "Failed to get access token"
+
+    headers = {"Authorization": f"Bearer {token}"}
+
     try:
         # Search product
         r = requests.get(f"https://api.stockx.com/v2/search?q={sku}", headers=headers, timeout=10)
@@ -39,7 +60,7 @@ def fetch_market_data(sku, size):
         name = product["title"]
         color = product.get("colorway", "N/A")
 
-        # Market snapshot
+        # Market data
         m = requests.get(f"https://api.stockx.com/v2/products/{pid}", headers=headers, timeout=10)
         if m.status_code != 200:
             return None, f"Market fetch failed: {m.status_code}"
@@ -57,7 +78,7 @@ def fetch_market_data(sku, size):
     except Exception as e:
         return None, str(e)
 
-# ─── SIDEBAR ─────────────────────────────────────────────────────
+# ─── SIDEBAR CONTROLS ────────────────────────────────────────────
 st.sidebar.header("Refresh Settings")
 refresh_min = st.sidebar.slider("Auto-refresh every (minutes)", 1, 60, 5)
 st.session_state.refresh_interval = refresh_min * 60
@@ -107,11 +128,11 @@ st.subheader("Tracked Bids – Live Updates")
 if not st.session_state.tracked_bids.empty:
     df = st.session_state.tracked_bids.copy()
 
-    # Format currency columns
+    # Format currency
     for col in ["Highest Bid", "Lowest Ask", "Last Sale"]:
         df[col] = df[col].apply(lambda x: f"£{x:,.0f}" if x > 0 else "—")
 
-    # Highlight changes
+    # Change formatting
     def format_change(x):
         if x == "—": return x
         if x > 0: return f"↑ £{x:,.0f}"
@@ -130,7 +151,6 @@ if not st.session_state.tracked_bids.empty:
         use_container_width=True
     )
 
-    # Export button
     csv = df.to_csv(index=False).encode('utf-8')
     st.download_button(
         "↓ Download CSV",
