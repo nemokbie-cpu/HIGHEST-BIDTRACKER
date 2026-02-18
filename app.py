@@ -1,147 +1,150 @@
 import streamlit as st
 import pandas as pd
-from datetime import datetime, timedelta
-import json
+import requests
+from datetime import datetime
+import time
 
-st.set_page_config(page_title="WTB Tracker (Manual Mode)", layout="wide", page_icon="👟")
-st.title("WTB Tracker – Manual Sales Paste Mode")
-st.info("API fetch is temporarily disabled due to 403 errors. Paste raw StockX sales data below to analyze.")
+st.set_page_config(page_title="StockX Highest Bid Tracker", layout="wide", page_icon="📈")
+st.title("📈 StockX Live Bid Tracker")
 
-# ─── PAYOUT FORMULA ──────────────────────────────────────────────
-def calculate_net(price):
-    if price < 57:
-        return round(price - 4.5 - (price * 0.03) - 4.00, 2)
-    else:
-        return round(price - (price * 0.08) - (price * 0.03) - 4.00, 2)
+# ─── SECURE API KEY ──────────────────────────────────────────────
+api_key = st.secrets.get("STOCKX_API_KEY", None)
+if not api_key:
+    st.error("StockX API key not found. Add STOCKX_API_KEY in Settings → Secrets.")
+    st.stop()
 
-def get_target_roi(est_days):
-    if est_days < 5:
-        return 0.30
-    elif 6 <= est_days <= 25:
-        return 0.35
-    else:
-        return 0.40
+headers = {"Authorization": f"Bearer {api_key}"}
 
-# ─── MANUAL ANALYSIS FUNCTION ────────────────────────────────────
-def analyze_pasted_sales(raw_text, sku, size, listed_price=0, platform="Manual", priority="Medium (Yellow)"):
-    prices = []
-    lines = raw_text.strip().split('\n')
-    cutoff = datetime.now() - timedelta(days=120)
+# ─── SESSION STATE ───────────────────────────────────────────────
+if "tracked_bids" not in st.session_state:
+    st.session_state.tracked_bids = pd.DataFrame(columns=[
+        "SKU", "Size", "Added At", "Shoe Name", "Colorway",
+        "Highest Bid", "Lowest Ask", "Last Sale", "# Asks",
+        "Bid Change", "Last Updated"
+    ])
 
-    i = 0
-    while i < len(lines):
-        line = lines[i].strip()
-        if '/' in line and ',' in line:  # date line
-            try:
-                date_part = line.split(',')[0].strip()
-                date = datetime.strptime(date_part, '%m/%d/%y')
-                if date > datetime.now():
-                    date = date.replace(year=date.year - 100)
-                i += 1
-                while i < len(lines):
-                    price_line = lines[i].strip()
-                    if price_line.startswith('£'):
-                        price_str = price_line.replace('£', '').replace(',', '').strip()
-                        price = float(price_str)
-                        if date >= cutoff:
-                            prices.append(price)
-                        break
-                    i += 1
-                continue
-            except:
-                pass
-        i += 1
+# ─── FETCH FUNCTION ──────────────────────────────────────────────
+def fetch_market_data(sku, size):
+    try:
+        # Search product
+        r = requests.get(f"https://api.stockx.com/v2/search?q={sku}", headers=headers, timeout=10)
+        if r.status_code != 200:
+            return None, f"Search failed: {r.status_code} - {r.text[:200]}"
+        data = r.json()
+        if not data.get("products"):
+            return None, "No product found for this SKU"
 
-    if not prices:
-        return None, "No valid sales found in last 120 days."
+        product = data["products"][0]
+        pid = product["id"]
+        name = product["title"]
+        color = product.get("colorway", "N/A")
 
-    n = len(prices)
-    avg_sale = sum(prices) / n
-    avg_net = sum(calculate_net(p) for p in prices) / n
-    est_days = 120 / n if n > 0 else 999
-    roi_target = get_target_roi(est_days)
-    rec_price = round(avg_net / (1 + roi_target), 2) if avg_net > 0 else 0
-    roi_pct = round((avg_net - listed_price) / listed_price * 100, 1) if listed_price > 0 else 0
+        # Market snapshot
+        m = requests.get(f"https://api.stockx.com/v2/products/{pid}", headers=headers, timeout=10)
+        if m.status_code != 200:
+            return None, f"Market fetch failed: {m.status_code}"
+        market = m.json().get("market", {})
 
-    result_row = {
-        "SKU": sku,
-        "Size": size,
-        "Platform": platform,
-        "Listed Price": listed_price,
-        "Priority": priority,
-        "#Sales 120D": n,
-        "Avg Sale £": round(avg_sale, 2),
-        "Avg Payout £": round(avg_net, 2),
-        "ROI %": roi_pct,
-        "Recommended Pay £": rec_price,
-        "Est Days to Sell": round(est_days, 1)
-    }
-    return result_row, None
+        return {
+            "name": name,
+            "colorway": color,
+            "highest_bid": market.get("highestBid", 0),
+            "lowest_ask": market.get("lowestAsk", 0),
+            "last_sale": market.get("lastSale", 0),
+            "num_asks": market.get("numberOfAsks", 0)
+        }, None
 
-# ─── SESSION STATE TABLES ────────────────────────────────────────
-platforms = ["Vinted", "eBay", "Other/Retail"]
-if "tables" not in st.session_state:
-    st.session_state.tables = {}
-    for p in platforms:
-        st.session_state.tables[p] = pd.DataFrame(columns=[
-            "SKU", "Size", "Platform", "Listed Price", "Priority",
-            "#Sales 120D", "Avg Sale £", "Avg Payout £", "ROI %",
-            "Recommended Pay £", "Est Days to Sell"
-        ])
+    except Exception as e:
+        return None, str(e)
 
-# ─── ADD MANUAL ENTRY ────────────────────────────────────────────
-with st.expander("➕ Add New Manual Entry", expanded=True):
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        sku = st.text_input("SKU")
-        size = st.text_input("UK Size")
-    with col2:
-        platform = st.selectbox("Platform", platforms)
-        listed_price = st.number_input("Listed Price (£)", min_value=0.0, value=0.0)
-    with col3:
-        priority = st.selectbox("Priority", ["High (Red)", "Medium (Yellow)", "Low (Green)"])
-    with col4:
-        raw_sales = st.text_area("Paste Raw StockX Sales Data Here", height=150)
+# ─── SIDEBAR ─────────────────────────────────────────────────────
+st.sidebar.header("Refresh Settings")
+refresh_min = st.sidebar.slider("Auto-refresh every (minutes)", 1, 60, 5)
+st.session_state.refresh_interval = refresh_min * 60
 
-    if st.button("Analyze & Add to Table"):
-        if sku and size and raw_sales:
-            row, err = analyze_pasted_sales(raw_sales, sku, size, listed_price, platform, priority)
-            if err:
-                st.error(err)
-            else:
-                st.session_state.tables[platform] = pd.concat(
-                    [st.session_state.tables[platform], pd.DataFrame([row])],
-                    ignore_index=True
-                )
-                st.success(f"Added {sku} {size} to {platform}")
+if st.sidebar.button("Force Refresh All"):
+    st.rerun()
+
+# ─── ADD NEW TRACKING ────────────────────────────────────────────
+st.subheader("Track a New SKU + Size")
+col1, col2 = st.columns(2)
+with col1:
+    sku = st.text_input("SKU", placeholder="e.g. HF7723-001")
+with col2:
+    size = st.text_input("UK Size", placeholder="e.g. 10.5")
+
+if st.button("Add & Fetch Current Bid"):
+    if sku and size:
+        data, err = fetch_market_data(sku.strip(), size.strip())
+        if err:
+            st.error(err)
         else:
-            st.warning("Fill all fields + paste sales data")
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            new_row = {
+                "SKU": sku.strip(),
+                "Size": size.strip(),
+                "Added At": now,
+                "Shoe Name": data["name"],
+                "Colorway": data["colorway"],
+                "Highest Bid": data["highest_bid"],
+                "Lowest Ask": data["lowest_ask"],
+                "Last Sale": data["last_sale"],
+                "# Asks": data["num_asks"],
+                "Bid Change": "—",
+                "Last Updated": now
+            }
+            st.session_state.tracked_bids = pd.concat(
+                [st.session_state.tracked_bids, pd.DataFrame([new_row])],
+                ignore_index=True
+            )
+            st.success(f"Added {sku} {size} – fetched live data")
+    else:
+        st.warning("Enter SKU and Size")
 
-# ─── DISPLAY TABLES ──────────────────────────────────────────────
-tab1, tab2, tab3 = st.tabs(["Vinted", "eBay", "Other/Retail"])
+# ─── LIVE TABLE ──────────────────────────────────────────────────
+st.subheader("Tracked Bids – Live Updates")
 
-for tab, p in zip([tab1, tab2, tab3], platforms):
-    with tab:
-        edited_df = st.data_editor(
-            st.session_state.tables[p],
-            num_rows="dynamic",
-            use_container_width=True,
-            key=f"{p.lower()}_editor"
-        )
-        st.session_state.tables[p] = edited_df
+if not st.session_state.tracked_bids.empty:
+    df = st.session_state.tracked_bids.copy()
 
-# ─── DASHBOARD ───────────────────────────────────────────────────
-st.header("📊 Dashboard")
-total = sum(len(df) for df in st.session_state.tables.values())
-high_cost = sum(df[df["Priority"] == "High (Red)"]["Recommended Pay £"].sum() for df in st.session_state.tables.values())
+    # Format currency columns
+    for col in ["Highest Bid", "Lowest Ask", "Last Sale"]:
+        df[col] = df[col].apply(lambda x: f"£{x:,.0f}" if x > 0 else "—")
 
-cols = st.columns(3)
-cols[0].metric("Total Items", total)
-cols[1].metric("High Priority Cost", f"£{high_cost:,.0f}")
+    # Highlight changes
+    def format_change(x):
+        if x == "—": return x
+        if x > 0: return f"↑ £{x:,.0f}"
+        if x < 0: return f"↓ £{abs(x):,.0f}"
+        return "—"
 
-# Export
-if st.button("Export All to CSV"):
-    all_df = pd.concat(st.session_state.tables.values(), ignore_index=True)
-    st.download_button("Download CSV", all_df.to_csv(index=False), "wtb_tracker.csv")
+    df["Bid Change"] = df["Bid Change"].apply(format_change)
 
-st.caption("Manual mode – paste StockX sales data • API coming back soon")
+    st.dataframe(
+        df,
+        column_config={
+            "Bid Change": st.column_config.TextColumn("Bid Change", width="small"),
+            "Last Updated": st.column_config.TextColumn("Last Updated", width="medium")
+        },
+        hide_index=True,
+        use_container_width=True
+    )
+
+    # Export button
+    csv = df.to_csv(index=False).encode('utf-8')
+    st.download_button(
+        "↓ Download CSV",
+        csv,
+        "stockx_bid_tracker.csv",
+        "text/csv"
+    )
+else:
+    st.info("Add SKUs above to start tracking live bids")
+
+# ─── AUTO-REFRESH ────────────────────────────────────────────────
+if "last_refresh" not in st.session_state:
+    st.session_state.last_refresh = time.time()
+
+if time.time() - st.session_state.last_refresh >= st.session_state.refresh_interval:
+    st.session_state.last_refresh = time.time()
+    st.rerun()
